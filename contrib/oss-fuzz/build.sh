@@ -45,7 +45,7 @@ make -j$(nproc) libpng16.la
 # Build the new libpng intrapixel fuzzer
 $CXX $CXXFLAGS -std=c++11 -I. \
     $SRC/libpng/contrib/oss-fuzz/libpng_intrapixel_fuzzer.cc \
-    -o $OUT/fuzz_png_intrapixel_fuzzer \
+    -o $OUT/libpng_intrapixel_fuzzer \
     -lFuzzingEngine .libs/libpng16.a -lz
 
 # add seed corpus.

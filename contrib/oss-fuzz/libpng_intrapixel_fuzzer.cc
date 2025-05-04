@@ -1,69 +1,154 @@
-// fuzz_png_intrapixel_fuzzer.cc
-// Fuzz harness for png_do_read_intrapixel
-// Build with: 
-//   clang++ -g -O1 -fsanitize=fuzzer,address -I/path/to/libpng/include \
-//     fuzz_png_intrapixel_fuzzer.cc -L/path/to/libpng/lib -lpng -o fuzz_png_intrapixel_fuzzer
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
-#include <cstdint>
-#include <cstddef>
-#include <cstdlib>
-#include <cstring>
-#include <png.h>
+#include <vector>
 
-// Ensure intrapixel differencing code is available
-#ifndef PNG_SEQUENTIAL_READ_SUPPORTED
-#define PNG_SEQUENTIAL_READ_SUPPORTED
-#endif
-#ifndef PNG_MNG_FEATURES_SUPPORTED
-#define PNG_MNG_FEATURES_SUPPORTED
-#endif
+#define PNG_INTERNAL
+#define PNG_MNG_FEATURES_SUPPORTED  // Ensure intrapixel path is enabled
+#include "png.h"
+
+#define PNG_CLEANUP \
+  if(png_handler.png_ptr) \
+  { \
+    if (png_handler.row_ptr) \
+      png_free(png_handler.png_ptr, png_handler.row_ptr); \
+    if (png_handler.end_info_ptr) \
+      png_destroy_read_struct(&png_handler.png_ptr, &png_handler.info_ptr,\
+        &png_handler.end_info_ptr); \
+    else if (png_handler.info_ptr) \
+      png_destroy_read_struct(&png_handler.png_ptr, &png_handler.info_ptr,\
+        nullptr); \
+    else \
+      png_destroy_read_struct(&png_handler.png_ptr, nullptr, nullptr); \
+    png_handler.png_ptr = nullptr; \
+    png_handler.row_ptr = nullptr; \
+    png_handler.info_ptr = nullptr; \
+    png_handler.end_info_ptr = nullptr; \
+  }
+
+struct BufState {
+  const uint8_t* data;
+  size_t bytes_left;
+};
+
+struct PngObjectHandler {
+  png_infop info_ptr = nullptr;
+  png_structp png_ptr = nullptr;
+  png_infop end_info_ptr = nullptr;
+  png_voidp row_ptr = nullptr;
+  BufState* buf_state = nullptr;
+
+  ~PngObjectHandler() {
+    if (row_ptr)
+      png_free(png_ptr, row_ptr);
+    if (end_info_ptr)
+      png_destroy_read_struct(&png_ptr, &info_ptr, &end_info_ptr);
+    else if (info_ptr)
+      png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
+    else
+      png_destroy_read_struct(&png_ptr, nullptr, nullptr);
+    delete buf_state;
+  }
+};
+
+void user_read_data(png_structp png_ptr, png_bytep data, size_t length) {
+  BufState* buf_state = static_cast<BufState*>(png_get_io_ptr(png_ptr));
+  if (length > buf_state->bytes_left) {
+    png_error(png_ptr, "read error");
+  }
+  memcpy(data, buf_state->data, length);
+  buf_state->bytes_left -= length;
+  buf_state->data += length;
+}
+
+void* limited_malloc(png_structp, png_alloc_size_t size) {
+  if (size > 8000000)
+    return nullptr;
+  return malloc(size);
+}
+
+void default_free(png_structp, png_voidp ptr) {
+  return free(ptr);
+}
+
+static const int kPngHeaderSize = 8;
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-    // We need at least 6 bytes: width (4), bit_depth (1), color_type (1)
-    if (size < 6) return 0;
+  if (size < kPngHeaderSize) return 0;
 
-    // Parse width (little-endian), bit depth and color type
-    uint32_t width = (uint32_t)data[0] |
-                     ((uint32_t)data[1] << 8) |
-                     ((uint32_t)data[2] << 16) |
-                     ((uint32_t)data[3] << 24);
-    uint8_t bit_depth = data[4];
-    uint8_t color_type = data[5];
+  if (png_sig_cmp(data, 0, kPngHeaderSize)) return 0;
 
-    // Only valid bit depths and color types for intrapixel
-    if (!(bit_depth == 8 || bit_depth == 16)) return 0;
-    if (!(color_type == PNG_COLOR_TYPE_RGB || color_type == PNG_COLOR_TYPE_RGB_ALPHA)) return 0;
+  PngObjectHandler png_handler;
+  png_handler.png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+  if (!png_handler.png_ptr) return 0;
 
-    // Calculate channels and bytes per pixel
-    int channels = (color_type == PNG_COLOR_TYPE_RGB) ? 3 : 4;
-    int bytes_per_channel = (bit_depth == 8 ? 1 : 2);
-    size_t rowbytes = (size_t)width * channels * bytes_per_channel;
+  png_handler.info_ptr = png_create_info_struct(png_handler.png_ptr);
+  if (!png_handler.info_ptr) { PNG_CLEANUP return 0; }
 
-    // Prevent overly large allocations
-    if (width == 0 || width > 1000000 || rowbytes > size) return 0;
+  png_handler.end_info_ptr = png_create_info_struct(png_handler.png_ptr);
+  if (!png_handler.end_info_ptr) { PNG_CLEANUP return 0; }
 
-    // Ensure there is enough data in fuzz input for row buffer
-    if (size - 6 < rowbytes) return 0;
+  png_set_mem_fn(png_handler.png_ptr, nullptr, limited_malloc, default_free);
+  png_set_crc_action(png_handler.png_ptr, PNG_CRC_QUIET_USE, PNG_CRC_QUIET_USE);
 
-    // Prepare png_row_info struct
-    png_row_info row_info;
-    std::memset(&row_info, 0, sizeof(row_info));
-    row_info.width       = width;
-    row_info.bit_depth   = bit_depth;
-    row_info.color_type  = color_type;
-    row_info.channels    = (png_byte)channels;
-    row_info.pixel_depth = (png_byte)(bit_depth * channels);
-    row_info.rowbytes    = rowbytes;
+  png_handler.buf_state = new BufState();
+  png_handler.buf_state->data = data + kPngHeaderSize;
+  png_handler.buf_state->bytes_left = size - kPngHeaderSize;
 
-    // Might need to call png_permit_mng_features()
-    // Allocate and populate row buffer
-    png_bytep row = (png_bytep)malloc(rowbytes);
-    if (!row) return 0;
-    std::memcpy(row, data + 6, rowbytes);
+  png_set_read_fn(png_handler.png_ptr, png_handler.buf_state, user_read_data);
+  png_set_sig_bytes(png_handler.png_ptr, kPngHeaderSize);
 
-    // Invoke intrapixel differencing
-    png_do_read_intrapixel(&row_info, row);
+  if (setjmp(png_jmpbuf(png_handler.png_ptr))) {
+    PNG_CLEANUP return 0;
+  }
 
-    free(row);
-    return 0;
+  png_read_info(png_handler.png_ptr, png_handler.info_ptr);
+
+  if (setjmp(png_jmpbuf(png_handler.png_ptr))) {
+    PNG_CLEANUP return 0;
+  }
+
+  png_uint_32 width, height;
+  int bit_depth, color_type, interlace_type, compression_type, filter_type;
+
+  if (!png_get_IHDR(png_handler.png_ptr, png_handler.info_ptr, &width,
+                    &height, &bit_depth, &color_type, &interlace_type,
+                    &compression_type, &filter_type)) {
+    PNG_CLEANUP return 0;
+  }
+
+  if (width && height > 100000000 / width) {
+    PNG_CLEANUP return 0;
+  }
+
+  png_set_gray_to_rgb(png_handler.png_ptr);
+  png_set_expand(png_handler.png_ptr);
+  png_set_packing(png_handler.png_ptr);
+  png_set_scale_16(png_handler.png_ptr);
+  png_set_tRNS_to_alpha(png_handler.png_ptr);
+
+  int passes = png_set_interlace_handling(png_handler.png_ptr);
+
+  // 🚨 Key logic: set intrapixel flags
+  png_handler.png_ptr->mng_features_permitted |= PNG_FLAG_MNG_FILTER_64;
+  png_handler.png_ptr->filter_type = PNG_INTRAPIXEL_DIFFERENCING;
+
+  png_read_update_info(png_handler.png_ptr, png_handler.info_ptr);
+
+  png_handler.row_ptr = png_malloc(
+      png_handler.png_ptr,
+      png_get_rowbytes(png_handler.png_ptr, png_handler.info_ptr));
+
+  for (int pass = 0; pass < passes; ++pass) {
+    for (png_uint_32 y = 0; y < height; ++y) {
+      png_read_row(png_handler.png_ptr,
+                   static_cast<png_bytep>(png_handler.row_ptr), nullptr);
+    }
+  }
+
+  png_read_end(png_handler.png_ptr, png_handler.end_info_ptr);
+  PNG_CLEANUP
+  return 0;
 }
