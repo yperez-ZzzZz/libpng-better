@@ -1,0 +1,2 @@
+CompileFlags:
+  Add: [-I/home/yagop/Documents/EPFL/SoftSec/libpng-better]
