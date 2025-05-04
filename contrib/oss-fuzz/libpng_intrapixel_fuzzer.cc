@@ -55,6 +55,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     row_info.pixel_depth = (png_byte)(bit_depth * channels);
     row_info.rowbytes    = rowbytes;
 
+    // Might need to call png_permit_mng_features()
     // Allocate and populate row buffer
     png_bytep row = (png_bytep)malloc(rowbytes);
     if (!row) return 0;
