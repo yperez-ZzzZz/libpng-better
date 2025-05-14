@@ -1,23 +1,11 @@
-// libpng_read_fuzzer.cc
-// Copyright 2017-2018 Glenn Randers-Pehrson
-// Copyright 2015 The Chromium Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style license that may
-// be found in the LICENSE file https://cs.chromium.org/chromium/src/LICENSE
-
-// The modifications in 2017 by Glenn Randers-Pehrson include
-// 1. addition of a PNG_CLEANUP macro,
-// 2. setting the option to ignore ADLER32 checksums,
-// 3. adding "#include <string.h>" which is needed on some platforms
-//    to provide memcpy().
-// 4. adding read_end_info() and creating an end_info structure.
-// 5. adding calls to png_set_*() transforms commonly used by browsers.
-
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <vector>
+#include <iostream>
+#include <stdio.h>
 
 #define PNG_INTERNAL
 #include "png.h"
@@ -94,11 +82,17 @@ void default_free(png_structp, png_voidp ptr) {
 
 static const int kPngHeaderSize = 8;
 
+int color_map[20000];
+
 // Entry point for LibFuzzer.
 // Roughly follows the libpng book example:
 // http://www.libpng.org/pub/png/book/chapter13.html
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   if (size < kPngHeaderSize) {
+    return 0;
+  }
+  size_t MAX_SIZE = 10000;
+  if (size > MAX_SIZE){ // do not allow too large input images
     return 0;
   }
 
@@ -135,11 +129,6 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   // Use a custom allocator that fails for large allocations to avoid OOM.
   png_set_mem_fn(png_handler.png_ptr, nullptr, limited_malloc, default_free);
 
-  png_set_crc_action(png_handler.png_ptr, PNG_CRC_QUIET_USE, PNG_CRC_QUIET_USE);
-#ifdef PNG_IGNORE_ADLER32
-  png_set_option(png_handler.png_ptr, PNG_IGNORE_ADLER32, PNG_OPTION_ON);
-#endif
-
   // Setting up reading from buffer.
   png_handler.buf_state = new BufState();
   png_handler.buf_state->data = data + kPngHeaderSize;
@@ -152,72 +141,13 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     return 0;
   }
 
-  // Reading.
-  png_read_info(png_handler.png_ptr, png_handler.info_ptr);
+  // call the png_read_png function to read the entire image
+  png_read_png(png_handler.png_ptr, png_handler.info_ptr, (int) data[size-1], NULL);
 
-  // reset error handler to put png_deleter into scope.
-  if (setjmp(png_jmpbuf(png_handler.png_ptr))) {
-    PNG_CLEANUP
-    return 0;
-  }
-
-  png_uint_32 width, height;
-  int bit_depth, color_type, interlace_type, compression_type;
-  int filter_type;
-
-  if (!png_get_IHDR(png_handler.png_ptr, png_handler.info_ptr, &width,
-                    &height, &bit_depth, &color_type, &interlace_type,
-                    &compression_type, &filter_type)) {
-    PNG_CLEANUP
-    return 0;
-  }
-
-  // This is going to be too slow.
-  if (width && height > 100000000 / width) {
-    PNG_CLEANUP
-    return 0;
-  }
-
-  // Set several transforms that browsers typically use:
-  png_set_gray_to_rgb(png_handler.png_ptr);
-  png_set_expand(png_handler.png_ptr);
-  png_set_packing(png_handler.png_ptr);
-  png_set_scale_16(png_handler.png_ptr);
-  png_set_tRNS_to_alpha(png_handler.png_ptr);
-
-  int passes = png_set_interlace_handling(png_handler.png_ptr);
-
-  png_read_update_info(png_handler.png_ptr, png_handler.info_ptr);
-
-  png_handler.row_ptr = png_malloc(
-      png_handler.png_ptr, png_get_rowbytes(png_handler.png_ptr,
-                                            png_handler.info_ptr));
-
-  for (int pass = 0; pass < passes; ++pass) {
-    for (png_uint_32 y = 0; y < height; ++y) {
-      png_read_row(png_handler.png_ptr,
-                   static_cast<png_bytep>(png_handler.row_ptr), nullptr);
-    }
-  }
-
-  png_read_end(png_handler.png_ptr, png_handler.end_info_ptr);
+  // get row_pointers
+  png_bytepp row_pointers = png_get_rows(png_handler.png_ptr, png_handler.info_ptr);
 
   PNG_CLEANUP
-
-#ifdef PNG_SIMPLIFIED_READ_SUPPORTED
-  // Simplified READ API
-  png_image image;
-  memset(&image, 0, (sizeof image));
-  image.version = PNG_IMAGE_VERSION;
-
-  if (!png_image_begin_read_from_memory(&image, data, size)) {
-    return 0;
-  }
-
-  image.format = PNG_FORMAT_RGBA;
-  std::vector<png_byte> buffer(PNG_IMAGE_SIZE(image));
-  png_image_finish_read(&image, NULL, buffer.data(), 0, NULL);
-#endif
 
   return 0;
 }
