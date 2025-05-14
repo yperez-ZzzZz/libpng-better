@@ -94,6 +94,8 @@ void default_free(png_structp, png_voidp ptr) {
 
 static const int kPngHeaderSize = 8;
 
+png_byte COLORMAP_BUFFER[20000];
+
 // Entry point for LibFuzzer.
 // Roughly follows the libpng book example:
 // http://www.libpng.org/pub/png/book/chapter13.html
@@ -214,9 +216,34 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     return 0;
   }
 
-  image.format = PNG_FORMAT_RGBA;
   std::vector<png_byte> buffer(PNG_IMAGE_SIZE(image));
+
+  // THIS PART IS MODIFIED
+  // The original fuzzer only fuzzes to the RGBA format. We test more configurations
+
+  image.format = PNG_FORMAT_GRAY; // fuzzes png_image_read_composite, png_image_read_background (fuzzes workaround with two gamma corrections)
   png_image_finish_read(&image, NULL, buffer.data(), 0, NULL);
+
+  image.format = PNG_FORMAT_RGBA_COLORMAP; // fuzzes png_image_read_colormap, png_image_read_colormapped
+  png_image_begin_read_from_memory(&image, data, size);
+  png_image_finish_read(&image, NULL, buffer.data(), 0, COLORMAP_BUFFER);
+
+  // use other configurations
+  image.format = PNG_FORMAT_RGB;
+  png_image_begin_read_from_memory(&image, data, size);
+  png_image_finish_read(&image, NULL, buffer.data(), 0, NULL);
+
+  image.format = PNG_FORMAT_RGBA;
+  png_image_begin_read_from_memory(&image, data, size);
+  png_image_finish_read(&image, NULL, buffer.data(), 0, NULL);
+
+  // try a different configuration GRAY -> COLORMAP
+  image.format = PNG_FORMAT_GRAY;
+  png_image_begin_read_from_memory(&image, data, size);
+  image.format = PNG_FORMAT_RGBA_COLORMAP;
+  png_image_finish_read(&image, NULL, buffer.data(), 0, COLORMAP_BUFFER);
+
+  // THIS IS THE END OF THE MODIFICATION
 #endif
 
   return 0;
